@@ -1,0 +1,16 @@
+Create a powershell script for downloading streams using yt-dlp:
+
+A) check for yt-dlp update
+B) Create a new folder where the script is run from, and set it as the download location. Name the folder the current time and date.
+C) start stream from beginning --live-from-start
+D) auto-resume if interrupted -c
+E) Ask user for URL 
+F) file size minimum 50 megabytes --min-filesize SIZE
+G) file size maximum 40 gigabytes --max-filesize SIZE
+H) --abort-on-unavailable-fragments
+I) --no-keep-fragments
+J) --windows-filenames
+K) --mtime
+L) --print-traffic
+M) Convert to MP4 after download if not already mp4 OR -t, --preset-alias PRESET TO MP4 
+
