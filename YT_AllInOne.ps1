@@ -39,21 +39,14 @@ Original scripts: YtEasy_Stream.ps1, run_ytv.ps1, run_yta.ps1.
 #Requires -Version 5.1
 # PowerShell 7+ is recommended for parallel downloads.
 
-[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium', DefaultParameterSetName = 'Video')]
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
 param(
-    [Parameter(Mandatory, ParameterSetName = 'Video')]
-    [switch]$Video,
+    [ValidateSet('Video', 'Audio', 'Stream')]
+    [string]$Mode,
 
-    [Parameter(Mandatory, ParameterSetName = 'Audio')]
-    [switch]$Audio,
+    [string]$Url,
 
-    [Parameter(Mandatory, ParameterSetName = 'Stream')]
-    [switch]$Stream,
-
-    [Parameter(Mandatory)]
-    [string[]]$Url,
-
-    [string]$OutputDir = (Join-Path -Path $PSScriptRoot -ChildPath 'out'),
+    [string]$OutputDir,
 
     [string]$FileTemplate,
 
@@ -68,13 +61,14 @@ param(
 
     [switch]$NoPlaylist,
 
-    [int]$MaxParallel = 4,
+    [int]$MaxParallel = 1,
 
     [switch]$PassThru,
 
-    [switch]$WhatIf,
+    [switch]$Interactive,
 
-    [switch]$Confirm,
+    [Parameter(DontShow = $true)]
+    [string[]]$ExtraArgs,
 
     [string]$YtDlpPath,
 
@@ -83,6 +77,38 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+function Show-Banner {
+    Write-Host "=== YT Easy AIO ===" -ForegroundColor Cyan
+    Write-Host "yt-dlp + ffmpeg helper  |  $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor DarkCyan
+}
+
+function Resolve-OutputDir {
+    param(
+        [string]$OutputDir,
+        [string]$DefaultName = 'out'
+    )
+
+    $root = $PSScriptRoot
+    if ([string]::IsNullOrWhiteSpace($root)) {
+        $root = (Get-Location).Path
+    }
+
+    if ([string]::IsNullOrWhiteSpace($OutputDir)) {
+        $OutputDir = Join-Path -Path $root -ChildPath $DefaultName
+    }
+    elseif (-not [System.IO.Path]::IsPathRooted($OutputDir)) {
+        $OutputDir = Join-Path -Path (Get-Location).Path -ChildPath $OutputDir
+    }
+
+    try {
+        $resolved = Resolve-Path -LiteralPath $OutputDir -ErrorAction Stop
+        return $resolved.Path
+    }
+    catch {
+        return [System.IO.Path]::GetFullPath($OutputDir)
+    }
+}
 
 function Resolve-ToolPath {
     [CmdletBinding()]
@@ -116,14 +142,40 @@ function Resolve-ToolPath {
 }
 
 function Get-PlatformInfo {
-    [CmdletBinding()]
-    param()
+    $isWin = $false
+    $isLinux = $false
+    $isMac = $false
 
-    return [PSCustomObject]@{
-        IsWindows = [bool]$IsWindows
-        IsLinux   = [bool]$IsLinux
-        IsMacOS   = [bool]$IsMacOS
-        PSVersion = $PSVersionTable.PSVersion.ToString()
+    try {
+        $ri = [System.Runtime.InteropServices.RuntimeInformation]
+        if ($ri::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)) {
+            $isWin = $true
+        }
+        elseif ($ri::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Linux)) {
+            $isLinux = $true
+        }
+        elseif ($ri::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::OSX)) {
+            $isMac = $true
+        }
+    }
+    catch {
+        $plat = [System.Environment]::OSVersion.Platform
+        switch ($plat) {
+            'Win32NT' { $isWin = $true }
+            4         { $isLinux = $true }
+            6         { $isMac = $true }
+            default   { $isWin = $true }
+        }
+
+        if (-not ($isWin -or $isMac)) {
+            $isLinux = $true
+        }
+    }
+
+    [PSCustomObject]@{
+        IsWindows = $isWin
+        IsLinux   = $isLinux
+        IsMacOS   = $isMac
     }
 }
 
@@ -138,46 +190,23 @@ function Test-UrlFormat {
     return [regex]::IsMatch($Value, $pattern)
 }
 
-function Get-UrlList {
+function Get-ValidatedUrl {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [string[]]$InputUrls
+        [string]$InputUrl
     )
 
-    $urls = New-Object System.Collections.Generic.List[string]
-    $set = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-
-    foreach ($item in $InputUrls) {
-        if ([string]::IsNullOrWhiteSpace($item)) {
-            continue
-        }
-
-        if (Test-Path -LiteralPath $item -PathType Leaf) {
-            $lines = Get-Content -LiteralPath $item | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-            foreach ($line in $lines) {
-                $trimmed = $line.Trim()
-                if (-not (Test-UrlFormat -Value $trimmed)) {
-                    throw "Invalid URL detected in file '$item': $trimmed"
-                }
-
-                if ($set.Add($trimmed)) {
-                    $urls.Add($trimmed) | Out-Null
-                }
-            }
-            continue
-        }
-
-        if (-not (Test-UrlFormat -Value $item)) {
-            throw "Invalid URL provided: $item"
-        }
-
-        if ($set.Add($item)) {
-            $urls.Add($item) | Out-Null
-        }
+    if ([string]::IsNullOrWhiteSpace($InputUrl)) {
+        throw 'A URL value is required.'
     }
 
-    return ,$urls.ToArray()
+    $trimmed = $InputUrl.Trim()
+    if (-not (Test-UrlFormat -Value $trimmed)) {
+        throw "Invalid URL provided: $trimmed"
+    }
+
+    return $trimmed
 }
 
 function Get-DefaultTemplate {
@@ -255,7 +284,9 @@ function Get-YtDownloadPlan {
 
         [switch]$NoPlaylist,
 
-        [string]$FfmpegPath
+        [string]$FfmpegPath,
+
+        [string[]]$ExtraArgs
     )
 
     $plan = [PSCustomObject]@{
@@ -306,6 +337,14 @@ function Get-YtDownloadPlan {
         $plan.Arguments.Add($FfmpegPath) | Out-Null
     }
 
+    if ($ExtraArgs) {
+        foreach ($arg in $ExtraArgs) {
+            if (-not [string]::IsNullOrWhiteSpace($arg)) {
+                $plan.Arguments.Add($arg) | Out-Null
+            }
+        }
+    }
+
     $plan.Arguments.Add($Url) | Out-Null
     return $plan
 }
@@ -331,21 +370,22 @@ function Get-YtStreamPlan {
 
         [switch]$NoPlaylist,
 
-        [string]$FfmpegPath
+        [string]$FfmpegPath,
+
+        [string[]]$ExtraArgs
     )
 
     $streamQuality = if ([string]::IsNullOrWhiteSpace($Quality)) { 'best' } else { $Quality }
-    $plan = Get-YtDownloadPlan -Mode 'Video' -Url $Url -OutputDir $OutputDir -Template $Template -Format $Format -Quality $streamQuality -Proxy $Proxy -CookiesFile $CookiesFile -NoPlaylist:$NoPlaylist.IsPresent -FfmpegPath $FfmpegPath
+    $plan = Get-YtDownloadPlan -Mode 'Video' -Url $Url -OutputDir $OutputDir -Template $Template -Format $Format -Quality $streamQuality -Proxy $Proxy -CookiesFile $CookiesFile -NoPlaylist:$NoPlaylist.IsPresent -FfmpegPath $FfmpegPath -ExtraArgs $ExtraArgs
     $plan.Mode = 'Stream'
 
-    $plan.Arguments.Insert(0, '--live-from-start')
     $plan.Arguments.Insert(0, '-c')
-    $plan.Arguments.Insert(3, '--min-filesize')
-    $plan.Arguments.Insert(4, '5M')
-    $plan.Arguments.Insert(5, '--max-filesize')
-    $plan.Arguments.Insert(6, '40G')
-    $plan.Arguments.Insert(7, '--abort-on-unavailable-fragments')
-    $plan.Arguments.Insert(8, '--no-keep-fragments')
+    $plan.Arguments.Insert(1, '--min-filesize')
+    $plan.Arguments.Insert(2, '5M')
+    $plan.Arguments.Insert(3, '--max-filesize')
+    $plan.Arguments.Insert(4, '40G')
+    $plan.Arguments.Insert(5, '--abort-on-unavailable-fragments')
+    $plan.Arguments.Insert(6, '--no-keep-fragments')
 
     return $plan
 }
@@ -481,21 +521,14 @@ function Invoke-YTStream {
 }
 
 function Start-YT {
-    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium', DefaultParameterSetName = 'Video')]
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
     param(
-        [Parameter(Mandatory, ParameterSetName = 'Video')]
-        [switch]$Video,
+        [ValidateSet('Video', 'Audio', 'Stream')]
+        [string]$Mode,
 
-        [Parameter(Mandatory, ParameterSetName = 'Audio')]
-        [switch]$Audio,
+        [string]$Url,
 
-        [Parameter(Mandatory, ParameterSetName = 'Stream')]
-        [switch]$Stream,
-
-        [Parameter(Mandatory)]
-        [string[]]$Url,
-
-        [string]$OutputDir = (Join-Path -Path $PSScriptRoot -ChildPath 'out'),
+        [string]$OutputDir,
 
         [string]$FileTemplate,
 
@@ -510,143 +543,99 @@ function Start-YT {
 
         [switch]$NoPlaylist,
 
-        [int]$MaxParallel = 4,
+        [int]$MaxParallel = 1,
 
         [switch]$PassThru,
 
-        [switch]$WhatIf,
-
-        [switch]$Confirm,
+        [Parameter(DontShow = $true)]
+        [string[]]$ExtraArgs,
 
         [string]$YtDlpPath,
 
         [string]$FfmpegPath
     )
 
-    if ($PSBoundParameters.ContainsKey('WhatIf') -and $WhatIf.IsPresent) {
-        $WhatIfPreference = $true
-    }
-
-    if ($PSBoundParameters.ContainsKey('Confirm') -and $Confirm.IsPresent) {
-        $ConfirmPreference = 'High'
-    }
-
     $platform = Get-PlatformInfo
-    Write-Verbose "PowerShell version: $($platform.PSVersion)"
+    Write-Verbose "PowerShell version: $($PSVersionTable.PSVersion)"
+    Write-Verbose "Platform: Windows=$($platform.IsWindows) Linux=$($platform.IsLinux) MacOS=$($platform.IsMacOS)"
 
-    if (-not (Test-Path -LiteralPath $OutputDir)) {
-        Write-Verbose "Creating output directory '$OutputDir'"
-        $null = New-Item -ItemType Directory -Path $OutputDir -Force
+    if ($MaxParallel -gt 1) {
+        Write-Warning 'MaxParallel is ignored in single-URL mode.'
     }
 
-    $mode = switch ($PSCmdlet.ParameterSetName) {
-        'Video'  { 'Video' }
-        'Audio'  { 'Audio' }
-        'Stream' { 'Stream' }
-        default  { throw 'Unable to determine execution mode.' }
+    if (-not $Mode) {
+        throw 'A mode of Video, Audio, or Stream must be specified.'
     }
 
-    $resolvedYtDlp = Resolve-ToolPath -Name 'yt-dlp' -OverridePath $YtDlpPath -FriendlyName 'yt-dlp' -InstallHint 'https://github.com/yt-dlp/yt-dlp#installation'
-    $resolvedFfmpeg = Resolve-ToolPath -Name 'ffmpeg' -OverridePath $FfmpegPath -FriendlyName 'ffmpeg' -InstallHint 'https://ffmpeg.org/download.html'
-
-    $urls = Get-UrlList -InputUrls $Url
-    if ($urls.Count -eq 0) {
-        Write-Warning 'No valid URLs were supplied. Nothing to do.'
-        return
+    if ([string]::IsNullOrWhiteSpace($Url)) {
+        throw 'Url is required when not in interactive mode.'
     }
 
-    $template = if ($FileTemplate) { $FileTemplate } else { Get-DefaultTemplate -Mode $mode }
+    $resolvedUrl = Get-ValidatedUrl -InputUrl $Url
 
-    $plans = @()
-    $streamWarningIssued = $false
-    for ($i = 0; $i -lt $urls.Count; $i++) {
-        $entry = $urls[$i]
-        $planOutputDir = $OutputDir
-        if ($mode -eq 'Stream') {
-            if (-not $streamWarningIssued -and $MaxParallel -gt 1) {
-                Write-Warning 'Streaming mode processes URLs sequentially; MaxParallel is ignored.'
-                $streamWarningIssued = $true
-            }
+    $OutputDir = Resolve-OutputDir -OutputDir $OutputDir -DefaultName 'out'
 
-            $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-            $uniqueSuffix = [System.Guid]::NewGuid().ToString('N').Substring(0, 6)
-            $planOutputDir = Join-Path -Path $OutputDir -ChildPath "stream-$timestamp-$uniqueSuffix"
-            if (-not (Test-Path -LiteralPath $planOutputDir)) {
-                $null = New-Item -ItemType Directory -Path $planOutputDir -Force
-            }
-        }
+    $operation = "Run yt-dlp ($Mode)"
 
-        $plan = if ($mode -eq 'Stream') {
-            Get-YtStreamPlan -Url $entry -OutputDir $planOutputDir -Template $template -Format $Format -Quality $Quality -Proxy $Proxy -CookiesFile $CookiesFile -NoPlaylist:$NoPlaylist.IsPresent -FfmpegPath $resolvedFfmpeg
-        } else {
-            Get-YtDownloadPlan -Mode $mode -Url $entry -OutputDir $planOutputDir -Template $template -Format $Format -Quality $Quality -Proxy $Proxy -CookiesFile $CookiesFile -NoPlaylist:$NoPlaylist.IsPresent -FfmpegPath $resolvedFfmpeg
-        }
-
-        $plans += $plan
-    }
-
-    $operation = switch ($mode) {
-        'Video'  { 'Download video' }
-        'Audio'  { 'Download audio' }
-        'Stream' { 'Record stream' }
-    }
-
-    $approvedPlans = @()
-    foreach ($plan in $plans) {
-        if ($PSCmdlet.ShouldProcess($plan.Url, $operation)) {
-            $approvedPlans += $plan
-        }
-    }
-
-    if ($approvedPlans.Count -eq 0) {
+    if (-not $PSCmdlet.ShouldProcess($resolvedUrl, $operation)) {
         Write-Verbose 'Operation cancelled by user.'
         return
     }
 
-    $results = @()
-    if ($mode -eq 'Stream') {
-        foreach ($plan in $approvedPlans) {
-            $results += Invoke-YTStream -YtDlpPath $resolvedYtDlp -FfmpegPath $resolvedFfmpeg -Plan $plan -PassThru:$PassThru.IsPresent
+    $template = if ($FileTemplate) { $FileTemplate } else { Get-DefaultTemplate -Mode $Mode }
+
+    $planOutputDir = $OutputDir
+    if (-not (Test-Path -LiteralPath $OutputDir)) {
+        if ($PSCmdlet.ShouldProcess($OutputDir, 'Create output directory')) {
+            Write-Verbose "Creating output directory '$OutputDir'"
+            $null = New-Item -ItemType Directory -Path $OutputDir -Force
         }
     }
-    else {
-        $useParallel = $false
-        if ($MaxParallel -gt 1 -and $approvedPlans.Count -gt 1) {
-            if ($PSVersionTable.PSVersion.Major -ge 7) {
-                $useParallel = $true
-            }
-            else {
-                Write-Warning 'Parallel execution requires PowerShell 7 or later. Falling back to sequential processing.'
-            }
-        }
 
-        if ($useParallel) {
-            $invoker = ${function:Invoke-YTTask}
-            $results = $approvedPlans | ForEach-Object -Parallel {
-                param($innerPlan, $yt, $pass)
-                & $using:invoker -YtDlpPath $yt -Plan $innerPlan -PassThru:$pass
-            } -ThrottleLimit $MaxParallel -ArgumentList $resolvedYtDlp, $PassThru.IsPresent
-        }
-        else {
-            foreach ($plan in $approvedPlans) {
-                $results += Invoke-YTTask -YtDlpPath $resolvedYtDlp -Plan $plan -PassThru:$PassThru.IsPresent
+    if ($Mode -eq 'Stream') {
+        $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+        $uniqueSuffix = [System.Guid]::NewGuid().ToString('N').Substring(0, 6)
+        $planOutputDir = Join-Path -Path $OutputDir -ChildPath "stream-$timestamp-$uniqueSuffix"
+        if (-not (Test-Path -LiteralPath $planOutputDir)) {
+            if ($PSCmdlet.ShouldProcess($planOutputDir, 'Create stream output directory')) {
+                $null = New-Item -ItemType Directory -Path $planOutputDir -Force
             }
         }
+    }
+
+    $ytCommandName = if ($platform.IsWindows) { 'yt-dlp.exe' } else { 'yt-dlp' }
+    $ffmpegCommandName = if ($platform.IsWindows) { 'ffmpeg.exe' } else { 'ffmpeg' }
+
+    $resolvedYtDlp = Resolve-ToolPath -Name $ytCommandName -OverridePath $YtDlpPath -FriendlyName 'yt-dlp' -InstallHint 'https://github.com/yt-dlp/yt-dlp#installation'
+    $resolvedFfmpeg = Resolve-ToolPath -Name $ffmpegCommandName -OverridePath $FfmpegPath -FriendlyName 'ffmpeg' -InstallHint 'https://ffmpeg.org/download.html'
+
+    $plan = if ($Mode -eq 'Stream') {
+        Get-YtStreamPlan -Url $resolvedUrl -OutputDir $planOutputDir -Template $template -Format $Format -Quality $Quality -Proxy $Proxy -CookiesFile $CookiesFile -NoPlaylist:$NoPlaylist.IsPresent -FfmpegPath $resolvedFfmpeg -ExtraArgs $ExtraArgs
+    }
+    else {
+        Get-YtDownloadPlan -Mode $Mode -Url $resolvedUrl -OutputDir $planOutputDir -Template $template -Format $Format -Quality $Quality -Proxy $Proxy -CookiesFile $CookiesFile -NoPlaylist:$NoPlaylist.IsPresent -FfmpegPath $resolvedFfmpeg -ExtraArgs $ExtraArgs
+    }
+
+    $result = if ($Mode -eq 'Stream') {
+        Invoke-YTStream -YtDlpPath $resolvedYtDlp -FfmpegPath $resolvedFfmpeg -Plan $plan -PassThru:$PassThru.IsPresent
+    }
+    else {
+        Invoke-YTTask -YtDlpPath $resolvedYtDlp -Plan $plan -PassThru:$PassThru.IsPresent
     }
 
     if ($PassThru) {
-        return $results
+        return $result
     }
 
     return
 }
 
 function Start-YTVideo {
-    [CmdletBinding(DefaultParameterSetName = 'Video', SupportsShouldProcess = $true)]
+    [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [Parameter(Mandatory)]
-        [string[]]$Url,
-        [string]$OutputDir = (Join-Path -Path $PSScriptRoot -ChildPath 'out'),
+        [string]$Url,
+        [string]$OutputDir,
         [string]$FileTemplate,
         [ValidateSet('best', '1080p', '720p', '480p', 'audio-best', 'audio-m4a', 'audio-mp3')]
         [string]$Quality = 'best',
@@ -654,23 +643,21 @@ function Start-YTVideo {
         [string]$Proxy,
         [string]$CookiesFile,
         [switch]$NoPlaylist,
-        [int]$MaxParallel = 4,
+        [int]$MaxParallel = 1,
         [switch]$PassThru,
-        [switch]$WhatIf,
-        [switch]$Confirm,
         [string]$YtDlpPath,
         [string]$FfmpegPath
     )
 
-    return Start-YT -Video -Url $Url -OutputDir $OutputDir -FileTemplate $FileTemplate -Quality $Quality -Format $Format -Proxy $Proxy -CookiesFile $CookiesFile -NoPlaylist:$NoPlaylist.IsPresent -MaxParallel $MaxParallel -PassThru:$PassThru.IsPresent -WhatIf:$WhatIf.IsPresent -Confirm:$Confirm.IsPresent -YtDlpPath $YtDlpPath -FfmpegPath $FfmpegPath
+    return Start-YT -Mode 'Video' -Url $Url -OutputDir $OutputDir -FileTemplate $FileTemplate -Quality $Quality -Format $Format -Proxy $Proxy -CookiesFile $CookiesFile -NoPlaylist:$NoPlaylist.IsPresent -MaxParallel $MaxParallel -PassThru:$PassThru.IsPresent -YtDlpPath $YtDlpPath -FfmpegPath $FfmpegPath
 }
 
 function Start-YTAudio {
-    [CmdletBinding(DefaultParameterSetName = 'Audio', SupportsShouldProcess = $true)]
+    [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [Parameter(Mandatory)]
-        [string[]]$Url,
-        [string]$OutputDir = (Join-Path -Path $PSScriptRoot -ChildPath 'out'),
+        [string]$Url,
+        [string]$OutputDir,
         [string]$FileTemplate,
         [ValidateSet('best', '1080p', '720p', '480p', 'audio-best', 'audio-m4a', 'audio-mp3')]
         [string]$Quality = 'audio-mp3',
@@ -678,23 +665,21 @@ function Start-YTAudio {
         [string]$Proxy,
         [string]$CookiesFile,
         [switch]$NoPlaylist,
-        [int]$MaxParallel = 4,
+        [int]$MaxParallel = 1,
         [switch]$PassThru,
-        [switch]$WhatIf,
-        [switch]$Confirm,
         [string]$YtDlpPath,
         [string]$FfmpegPath
     )
 
-    return Start-YT -Audio -Url $Url -OutputDir $OutputDir -FileTemplate $FileTemplate -Quality $Quality -Format $Format -Proxy $Proxy -CookiesFile $CookiesFile -NoPlaylist:$NoPlaylist.IsPresent -MaxParallel $MaxParallel -PassThru:$PassThru.IsPresent -WhatIf:$WhatIf.IsPresent -Confirm:$Confirm.IsPresent -YtDlpPath $YtDlpPath -FfmpegPath $FfmpegPath
+    return Start-YT -Mode 'Audio' -Url $Url -OutputDir $OutputDir -FileTemplate $FileTemplate -Quality $Quality -Format $Format -Proxy $Proxy -CookiesFile $CookiesFile -NoPlaylist:$NoPlaylist.IsPresent -MaxParallel $MaxParallel -PassThru:$PassThru.IsPresent -YtDlpPath $YtDlpPath -FfmpegPath $FfmpegPath
 }
 
 function Start-YTStream {
-    [CmdletBinding(DefaultParameterSetName = 'Stream', SupportsShouldProcess = $true)]
+    [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [Parameter(Mandatory)]
-        [string[]]$Url,
-        [string]$OutputDir = (Join-Path -Path $PSScriptRoot -ChildPath 'out'),
+        [string]$Url,
+        [string]$OutputDir,
         [string]$FileTemplate,
         [ValidateSet('best', '1080p', '720p', '480p', 'audio-best', 'audio-m4a', 'audio-mp3')]
         [string]$Quality = 'best',
@@ -702,15 +687,80 @@ function Start-YTStream {
         [string]$Proxy,
         [string]$CookiesFile,
         [switch]$NoPlaylist,
-        [int]$MaxParallel = 4,
+        [int]$MaxParallel = 1,
         [switch]$PassThru,
-        [switch]$WhatIf,
-        [switch]$Confirm,
         [string]$YtDlpPath,
         [string]$FfmpegPath
     )
 
-    return Start-YT -Stream -Url $Url -OutputDir $OutputDir -FileTemplate $FileTemplate -Quality $Quality -Format $Format -Proxy $Proxy -CookiesFile $CookiesFile -NoPlaylist:$NoPlaylist.IsPresent -MaxParallel $MaxParallel -PassThru:$PassThru.IsPresent -WhatIf:$WhatIf.IsPresent -Confirm:$Confirm.IsPresent -YtDlpPath $YtDlpPath -FfmpegPath $FfmpegPath
+    return Start-YT -Mode 'Stream' -Url $Url -OutputDir $OutputDir -FileTemplate $FileTemplate -Quality $Quality -Format $Format -Proxy $Proxy -CookiesFile $CookiesFile -NoPlaylist:$NoPlaylist.IsPresent -MaxParallel $MaxParallel -PassThru:$PassThru.IsPresent -YtDlpPath $YtDlpPath -FfmpegPath $FfmpegPath
+}
+
+function Invoke-InteractiveFlow {
+    Show-Banner
+
+    do {
+        $u = Read-Host 'Enter URL'
+    } while ([string]::IsNullOrWhiteSpace($u) -or ($u -notmatch '^https?://'))
+
+    $url = $u.Trim()
+
+    $modeKey = Read-Host '[A]udio, [V]ideo, or [S]tream?'
+    switch ($modeKey.ToUpper()) {
+        'A' { $mode = 'Audio' }
+        'V' { $mode = 'Video' }
+        'S' { $mode = 'Stream' }
+        default { Write-Host 'Invalid choice' -ForegroundColor Red; return }
+    }
+
+    $quality = $null
+    $extra = New-Object System.Collections.Generic.List[string]
+
+    if ($mode -eq 'Video') {
+        $q = Read-Host 'Quality: [1] best  [2] 1080p  [3] 720p  [4] 480p'
+        $quality = switch ($q) {
+            '2' { '1080p' }
+            '3' { '720p' }
+            '4' { '480p' }
+            default { 'best' }
+        }
+
+        if ((Read-Host 'Convert to MP4? (Y/N)').ToUpper() -eq 'Y') {
+            $extra.Add('--recode-video') | Out-Null
+            $extra.Add('mp4') | Out-Null
+        }
+    }
+    elseif ($mode -eq 'Audio') {
+        $a = Read-Host 'Audio format: [1] best  [2] m4a  [3] mp3'
+        $quality = switch ($a) {
+            '2' { 'audio-m4a' }
+            '3' { 'audio-mp3' }
+            default { 'audio-best' }
+        }
+    }
+    else {
+        if ((Read-Host 'Start from beginning? (Y/N)').ToUpper() -eq 'Y') {
+            $extra.Add('--live-from-start') | Out-Null
+        }
+    }
+
+    if (-not $quality) {
+        $quality = 'best'
+    }
+
+    Write-Host "Starting $mode for $url" -ForegroundColor Green
+
+    $startParams = @{
+        Mode    = $mode
+        Url     = $url
+        Quality = $quality
+    }
+
+    if ($extra.Count -gt 0) {
+        $startParams['ExtraArgs'] = $extra.ToArray()
+    }
+
+    Start-YT @startParams
 }
 
 Set-Alias -Name ytv -Value Start-YTVideo
@@ -719,5 +769,44 @@ Set-Alias -Name yts -Value Start-YTStream
 Set-Alias -Name ytall -Value Start-YT
 
 if ($MyInvocation.InvocationName -ne '.') {
-    Start-YT @PSBoundParameters | Out-Null
+    $common = @(
+        'WhatIf','Confirm','Verbose','Debug','ErrorAction','WarningAction',
+        'InformationAction','OutVariable','OutBuffer','PipelineVariable'
+    )
+
+    $boundNonCommon = @($PSBoundParameters.Keys | Where-Object { $_ -notin $common })
+    $isInteractive = ($boundNonCommon.Count -eq 0) -or $Interactive.IsPresent
+
+    if ($isInteractive) {
+        Invoke-InteractiveFlow
+    }
+    else {
+        Show-Banner
+        $OutputDir = Resolve-OutputDir -OutputDir $OutputDir -DefaultName 'out'
+        if ($PSCmdlet.ShouldProcess($OutputDir, 'Ensure output directory')) {
+            if (-not (Test-Path -LiteralPath $OutputDir)) {
+                New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+            }
+        }
+
+        $invokeParams = @{}
+        foreach ($key in $PSBoundParameters.Keys) {
+            if ($key -eq 'Interactive') {
+                continue
+            }
+
+            if ($key -eq 'OutputDir') {
+                $invokeParams[$key] = $OutputDir
+            }
+            else {
+                $invokeParams[$key] = $PSBoundParameters[$key]
+            }
+        }
+
+        if (-not $invokeParams.ContainsKey('OutputDir')) {
+            $invokeParams['OutputDir'] = $OutputDir
+        }
+
+        Start-YT @invokeParams
+    }
 }
