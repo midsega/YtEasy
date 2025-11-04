@@ -72,10 +72,6 @@ param(
 
     [switch]$PassThru,
 
-    [switch]$WhatIf,
-
-    [switch]$Confirm,
-
     [string]$YtDlpPath,
 
     [string]$FfmpegPath
@@ -514,29 +510,19 @@ function Start-YT {
 
         [switch]$PassThru,
 
-        [switch]$WhatIf,
-
-        [switch]$Confirm,
-
         [string]$YtDlpPath,
 
         [string]$FfmpegPath
     )
 
-    if ($PSBoundParameters.ContainsKey('WhatIf') -and $WhatIf.IsPresent) {
-        $WhatIfPreference = $true
-    }
-
-    if ($PSBoundParameters.ContainsKey('Confirm') -and $Confirm.IsPresent) {
-        $ConfirmPreference = 'High'
-    }
-
     $platform = Get-PlatformInfo
     Write-Verbose "PowerShell version: $($platform.PSVersion)"
 
     if (-not (Test-Path -LiteralPath $OutputDir)) {
-        Write-Verbose "Creating output directory '$OutputDir'"
-        $null = New-Item -ItemType Directory -Path $OutputDir -Force
+        if ($PSCmdlet.ShouldProcess($OutputDir, 'Create output directory')) {
+            Write-Verbose "Creating output directory '$OutputDir'"
+            $null = New-Item -ItemType Directory -Path $OutputDir -Force
+        }
     }
 
     $mode = switch ($PSCmdlet.ParameterSetName) {
@@ -572,7 +558,9 @@ function Start-YT {
             $uniqueSuffix = [System.Guid]::NewGuid().ToString('N').Substring(0, 6)
             $planOutputDir = Join-Path -Path $OutputDir -ChildPath "stream-$timestamp-$uniqueSuffix"
             if (-not (Test-Path -LiteralPath $planOutputDir)) {
-                $null = New-Item -ItemType Directory -Path $planOutputDir -Force
+                if ($PSCmdlet.ShouldProcess($planOutputDir, 'Create stream output directory')) {
+                    $null = New-Item -ItemType Directory -Path $planOutputDir -Force
+                }
             }
         }
 
@@ -656,13 +644,11 @@ function Start-YTVideo {
         [switch]$NoPlaylist,
         [int]$MaxParallel = 4,
         [switch]$PassThru,
-        [switch]$WhatIf,
-        [switch]$Confirm,
         [string]$YtDlpPath,
         [string]$FfmpegPath
     )
 
-    return Start-YT -Video -Url $Url -OutputDir $OutputDir -FileTemplate $FileTemplate -Quality $Quality -Format $Format -Proxy $Proxy -CookiesFile $CookiesFile -NoPlaylist:$NoPlaylist.IsPresent -MaxParallel $MaxParallel -PassThru:$PassThru.IsPresent -WhatIf:$WhatIf.IsPresent -Confirm:$Confirm.IsPresent -YtDlpPath $YtDlpPath -FfmpegPath $FfmpegPath
+    return Start-YT -Video -Url $Url -OutputDir $OutputDir -FileTemplate $FileTemplate -Quality $Quality -Format $Format -Proxy $Proxy -CookiesFile $CookiesFile -NoPlaylist:$NoPlaylist.IsPresent -MaxParallel $MaxParallel -PassThru:$PassThru.IsPresent -YtDlpPath $YtDlpPath -FfmpegPath $FfmpegPath
 }
 
 function Start-YTAudio {
@@ -680,13 +666,11 @@ function Start-YTAudio {
         [switch]$NoPlaylist,
         [int]$MaxParallel = 4,
         [switch]$PassThru,
-        [switch]$WhatIf,
-        [switch]$Confirm,
         [string]$YtDlpPath,
         [string]$FfmpegPath
     )
 
-    return Start-YT -Audio -Url $Url -OutputDir $OutputDir -FileTemplate $FileTemplate -Quality $Quality -Format $Format -Proxy $Proxy -CookiesFile $CookiesFile -NoPlaylist:$NoPlaylist.IsPresent -MaxParallel $MaxParallel -PassThru:$PassThru.IsPresent -WhatIf:$WhatIf.IsPresent -Confirm:$Confirm.IsPresent -YtDlpPath $YtDlpPath -FfmpegPath $FfmpegPath
+    return Start-YT -Audio -Url $Url -OutputDir $OutputDir -FileTemplate $FileTemplate -Quality $Quality -Format $Format -Proxy $Proxy -CookiesFile $CookiesFile -NoPlaylist:$NoPlaylist.IsPresent -MaxParallel $MaxParallel -PassThru:$PassThru.IsPresent -YtDlpPath $YtDlpPath -FfmpegPath $FfmpegPath
 }
 
 function Start-YTStream {
@@ -704,13 +688,11 @@ function Start-YTStream {
         [switch]$NoPlaylist,
         [int]$MaxParallel = 4,
         [switch]$PassThru,
-        [switch]$WhatIf,
-        [switch]$Confirm,
         [string]$YtDlpPath,
         [string]$FfmpegPath
     )
 
-    return Start-YT -Stream -Url $Url -OutputDir $OutputDir -FileTemplate $FileTemplate -Quality $Quality -Format $Format -Proxy $Proxy -CookiesFile $CookiesFile -NoPlaylist:$NoPlaylist.IsPresent -MaxParallel $MaxParallel -PassThru:$PassThru.IsPresent -WhatIf:$WhatIf.IsPresent -Confirm:$Confirm.IsPresent -YtDlpPath $YtDlpPath -FfmpegPath $FfmpegPath
+    return Start-YT -Stream -Url $Url -OutputDir $OutputDir -FileTemplate $FileTemplate -Quality $Quality -Format $Format -Proxy $Proxy -CookiesFile $CookiesFile -NoPlaylist:$NoPlaylist.IsPresent -MaxParallel $MaxParallel -PassThru:$PassThru.IsPresent -YtDlpPath $YtDlpPath -FfmpegPath $FfmpegPath
 }
 
 Set-Alias -Name ytv -Value Start-YTVideo
