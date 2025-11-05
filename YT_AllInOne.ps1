@@ -46,7 +46,7 @@ param(
 
     [string]$Url,
 
-    [string]$OutputDir = (Join-Path -Path $PSScriptRoot -ChildPath 'out'),
+    [string]$OutputDir,
 
     [string]$FileTemplate,
 
@@ -65,11 +65,10 @@ param(
 
     [switch]$PassThru,
 
-    [switch]$WhatIf,
-
-    [switch]$Confirm,
-
     [switch]$Interactive,
+
+    [Parameter(DontShow = $true)]
+    [string[]]$ExtraArgs,
 
     [string]$YtDlpPath,
 
@@ -81,7 +80,34 @@ $ErrorActionPreference = 'Stop'
 
 function Show-Banner {
     Write-Host "=== YT Easy AIO ===" -ForegroundColor Cyan
-    Write-Host "yt-dlp + ffmpeg helper | $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor DarkCyan
+    Write-Host "yt-dlp + ffmpeg helper  |  $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor DarkCyan
+}
+
+function Resolve-OutputDir {
+    param(
+        [string]$OutputDir,
+        [string]$DefaultName = 'out'
+    )
+
+    $root = $PSScriptRoot
+    if ([string]::IsNullOrWhiteSpace($root)) {
+        $root = (Get-Location).Path
+    }
+
+    if ([string]::IsNullOrWhiteSpace($OutputDir)) {
+        $OutputDir = Join-Path -Path $root -ChildPath $DefaultName
+    }
+    elseif (-not [System.IO.Path]::IsPathRooted($OutputDir)) {
+        $OutputDir = Join-Path -Path (Get-Location).Path -ChildPath $OutputDir
+    }
+
+    try {
+        $resolved = Resolve-Path -LiteralPath $OutputDir -ErrorAction Stop
+        return $resolved.Path
+    }
+    catch {
+        return [System.IO.Path]::GetFullPath($OutputDir)
+    }
 }
 
 function Resolve-ToolPath {
@@ -116,14 +142,40 @@ function Resolve-ToolPath {
 }
 
 function Get-PlatformInfo {
-    [CmdletBinding()]
-    param()
+    $isWin = $false
+    $isLinux = $false
+    $isMac = $false
 
-    return [PSCustomObject]@{
-        IsWindows = [bool]$IsWindows
-        IsLinux   = [bool]$IsLinux
-        IsMacOS   = [bool]$IsMacOS
-        PSVersion = $PSVersionTable.PSVersion.ToString()
+    try {
+        $ri = [System.Runtime.InteropServices.RuntimeInformation]
+        if ($ri::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)) {
+            $isWin = $true
+        }
+        elseif ($ri::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Linux)) {
+            $isLinux = $true
+        }
+        elseif ($ri::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::OSX)) {
+            $isMac = $true
+        }
+    }
+    catch {
+        $plat = [System.Environment]::OSVersion.Platform
+        switch ($plat) {
+            'Win32NT' { $isWin = $true }
+            4         { $isLinux = $true }
+            6         { $isMac = $true }
+            default   { $isWin = $true }
+        }
+
+        if (-not ($isWin -or $isMac)) {
+            $isLinux = $true
+        }
+    }
+
+    [PSCustomObject]@{
+        IsWindows = $isWin
+        IsLinux   = $isLinux
+        IsMacOS   = $isMac
     }
 }
 
@@ -469,14 +521,14 @@ function Invoke-YTStream {
 }
 
 function Start-YT {
-    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
+    [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [ValidateSet('Video', 'Audio', 'Stream')]
         [string]$Mode,
 
         [string]$Url,
 
-        [string]$OutputDir = (Join-Path -Path $PSScriptRoot -ChildPath 'out'),
+        [string]$OutputDir,
 
         [string]$FileTemplate,
 
@@ -504,7 +556,8 @@ function Start-YT {
     )
 
     $platform = Get-PlatformInfo
-    Write-Verbose "PowerShell version: $($platform.PSVersion)"
+    Write-Verbose "PowerShell version: $($PSVersionTable.PSVersion)"
+    Write-Verbose "Platform: Windows=$($platform.IsWindows) Linux=$($platform.IsLinux) MacOS=$($platform.IsMacOS)"
 
     if ($MaxParallel -gt 1) {
         Write-Warning 'MaxParallel is ignored in single-URL mode.'
@@ -514,8 +567,24 @@ function Start-YT {
         throw 'A mode of Video, Audio, or Stream must be specified.'
     }
 
+    if ([string]::IsNullOrWhiteSpace($Url)) {
+        throw 'Url is required when not in interactive mode.'
+    }
+
     $resolvedUrl = Get-ValidatedUrl -InputUrl $Url
 
+    $OutputDir = Resolve-OutputDir -OutputDir $OutputDir -DefaultName 'out'
+
+    $operation = "Run yt-dlp ($Mode)"
+
+    if (-not $PSCmdlet.ShouldProcess($resolvedUrl, $operation)) {
+        Write-Verbose 'Operation cancelled by user.'
+        return
+    }
+
+    $template = if ($FileTemplate) { $FileTemplate } else { Get-DefaultTemplate -Mode $Mode }
+
+    $planOutputDir = $OutputDir
     if (-not (Test-Path -LiteralPath $OutputDir)) {
         if ($PSCmdlet.ShouldProcess($OutputDir, 'Create output directory')) {
             Write-Verbose "Creating output directory '$OutputDir'"
@@ -523,12 +592,6 @@ function Start-YT {
         }
     }
 
-    $resolvedYtDlp = Resolve-ToolPath -Name 'yt-dlp' -OverridePath $YtDlpPath -FriendlyName 'yt-dlp' -InstallHint 'https://github.com/yt-dlp/yt-dlp#installation'
-    $resolvedFfmpeg = Resolve-ToolPath -Name 'ffmpeg' -OverridePath $FfmpegPath -FriendlyName 'ffmpeg' -InstallHint 'https://ffmpeg.org/download.html'
-
-    $template = if ($FileTemplate) { $FileTemplate } else { Get-DefaultTemplate -Mode $Mode }
-
-    $planOutputDir = $OutputDir
     if ($Mode -eq 'Stream') {
         $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
         $uniqueSuffix = [System.Guid]::NewGuid().ToString('N').Substring(0, 6)
@@ -540,22 +603,17 @@ function Start-YT {
         }
     }
 
+    $ytCommandName = if ($platform.IsWindows) { 'yt-dlp.exe' } else { 'yt-dlp' }
+    $ffmpegCommandName = if ($platform.IsWindows) { 'ffmpeg.exe' } else { 'ffmpeg' }
+
+    $resolvedYtDlp = Resolve-ToolPath -Name $ytCommandName -OverridePath $YtDlpPath -FriendlyName 'yt-dlp' -InstallHint 'https://github.com/yt-dlp/yt-dlp#installation'
+    $resolvedFfmpeg = Resolve-ToolPath -Name $ffmpegCommandName -OverridePath $FfmpegPath -FriendlyName 'ffmpeg' -InstallHint 'https://ffmpeg.org/download.html'
+
     $plan = if ($Mode -eq 'Stream') {
         Get-YtStreamPlan -Url $resolvedUrl -OutputDir $planOutputDir -Template $template -Format $Format -Quality $Quality -Proxy $Proxy -CookiesFile $CookiesFile -NoPlaylist:$NoPlaylist.IsPresent -FfmpegPath $resolvedFfmpeg -ExtraArgs $ExtraArgs
     }
     else {
         Get-YtDownloadPlan -Mode $Mode -Url $resolvedUrl -OutputDir $planOutputDir -Template $template -Format $Format -Quality $Quality -Proxy $Proxy -CookiesFile $CookiesFile -NoPlaylist:$NoPlaylist.IsPresent -FfmpegPath $resolvedFfmpeg -ExtraArgs $ExtraArgs
-    }
-
-    $operation = switch ($Mode) {
-        'Video'  { 'Download video' }
-        'Audio'  { 'Download audio' }
-        'Stream' { 'Record stream' }
-    }
-
-    if (-not $PSCmdlet.ShouldProcess($resolvedUrl, $operation)) {
-        Write-Verbose 'Operation cancelled by user.'
-        return
     }
 
     $result = if ($Mode -eq 'Stream') {
@@ -577,7 +635,7 @@ function Start-YTVideo {
     param(
         [Parameter(Mandatory)]
         [string]$Url,
-        [string]$OutputDir = (Join-Path -Path $PSScriptRoot -ChildPath 'out'),
+        [string]$OutputDir,
         [string]$FileTemplate,
         [ValidateSet('best', '1080p', '720p', '480p', 'audio-best', 'audio-m4a', 'audio-mp3')]
         [string]$Quality = 'best',
@@ -599,7 +657,7 @@ function Start-YTAudio {
     param(
         [Parameter(Mandatory)]
         [string]$Url,
-        [string]$OutputDir = (Join-Path -Path $PSScriptRoot -ChildPath 'out'),
+        [string]$OutputDir,
         [string]$FileTemplate,
         [ValidateSet('best', '1080p', '720p', '480p', 'audio-best', 'audio-m4a', 'audio-mp3')]
         [string]$Quality = 'audio-mp3',
@@ -621,7 +679,7 @@ function Start-YTStream {
     param(
         [Parameter(Mandatory)]
         [string]$Url,
-        [string]$OutputDir = (Join-Path -Path $PSScriptRoot -ChildPath 'out'),
+        [string]$OutputDir,
         [string]$FileTemplate,
         [ValidateSet('best', '1080p', '720p', '480p', 'audio-best', 'audio-m4a', 'audio-mp3')]
         [string]$Quality = 'best',
@@ -656,10 +714,10 @@ function Invoke-InteractiveFlow {
     }
 
     $quality = $null
-    $extra = @()
+    $extra = New-Object System.Collections.Generic.List[string]
 
     if ($mode -eq 'Video') {
-        $q = Read-Host 'Quality: [1] best [2] 1080p [3] 720p [4] 480p'
+        $q = Read-Host 'Quality: [1] best  [2] 1080p  [3] 720p  [4] 480p'
         $quality = switch ($q) {
             '2' { '1080p' }
             '3' { '720p' }
@@ -668,14 +726,12 @@ function Invoke-InteractiveFlow {
         }
 
         if ((Read-Host 'Convert to MP4? (Y/N)').ToUpper() -eq 'Y') {
-            $extra += '-S'
-            $extra += 'ext:mp4:m4a'
-            $extra += '--remux-video'
-            $extra += 'mp4'
+            $extra.Add('--recode-video') | Out-Null
+            $extra.Add('mp4') | Out-Null
         }
     }
     elseif ($mode -eq 'Audio') {
-        $a = Read-Host 'Audio format: [1] best [2] m4a [3] mp3'
+        $a = Read-Host 'Audio format: [1] best  [2] m4a  [3] mp3'
         $quality = switch ($a) {
             '2' { 'audio-m4a' }
             '3' { 'audio-mp3' }
@@ -684,7 +740,7 @@ function Invoke-InteractiveFlow {
     }
     else {
         if ((Read-Host 'Start from beginning? (Y/N)').ToUpper() -eq 'Y') {
-            $extra += '--live-from-start'
+            $extra.Add('--live-from-start') | Out-Null
         }
     }
 
@@ -693,9 +749,18 @@ function Invoke-InteractiveFlow {
     }
 
     Write-Host "Starting $mode for $url" -ForegroundColor Green
-    [void](Read-Host 'Press Enter to start or Ctrl+C to cancel')
 
-    Start-YT -Mode $mode -Url $url -Quality $quality -ExtraArgs $extra
+    $startParams = @{
+        Mode    = $mode
+        Url     = $url
+        Quality = $quality
+    }
+
+    if ($extra.Count -gt 0) {
+        $startParams['ExtraArgs'] = $extra.ToArray()
+    }
+
+    Start-YT @startParams
 }
 
 Set-Alias -Name ytv -Value Start-YTVideo
@@ -704,20 +769,42 @@ Set-Alias -Name yts -Value Start-YTStream
 Set-Alias -Name ytall -Value Start-YT
 
 if ($MyInvocation.InvocationName -ne '.') {
-    $isInteractive = ($PSBoundParameters.Count -eq 0) -or $Interactive.IsPresent
+    $common = @(
+        'WhatIf','Confirm','Verbose','Debug','ErrorAction','WarningAction',
+        'InformationAction','OutVariable','OutBuffer','PipelineVariable'
+    )
+
+    $boundNonCommon = @($PSBoundParameters.Keys | Where-Object { $_ -notin $common })
+    $isInteractive = ($boundNonCommon.Count -eq 0) -or $Interactive.IsPresent
 
     if ($isInteractive) {
         Invoke-InteractiveFlow
     }
     else {
         Show-Banner
+        $OutputDir = Resolve-OutputDir -OutputDir $OutputDir -DefaultName 'out'
+        if ($PSCmdlet.ShouldProcess($OutputDir, 'Ensure output directory')) {
+            if (-not (Test-Path -LiteralPath $OutputDir)) {
+                New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+            }
+        }
+
         $invokeParams = @{}
         foreach ($key in $PSBoundParameters.Keys) {
             if ($key -eq 'Interactive') {
                 continue
             }
 
-            $invokeParams[$key] = $PSBoundParameters[$key]
+            if ($key -eq 'OutputDir') {
+                $invokeParams[$key] = $OutputDir
+            }
+            else {
+                $invokeParams[$key] = $PSBoundParameters[$key]
+            }
+        }
+
+        if (-not $invokeParams.ContainsKey('OutputDir')) {
+            $invokeParams['OutputDir'] = $OutputDir
         }
 
         Start-YT @invokeParams
